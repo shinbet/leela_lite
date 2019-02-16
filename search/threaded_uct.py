@@ -81,14 +81,19 @@ class UCTNode():
             cur = cur.parent
         return ' '.join(reversed(moves))
 
+POOL = None
+
 def Threaded_UCT_search(board, num_reads, net=None, C=1.0):
+    global POOL
     assert (net != None)
+    if not POOL:
+        POOL = Pool(10)
+
     root = UCTNode(board)
     log.info('fen: %s', repr(board))
-    p = Pool(5)
     res = []
-    for i in range(5):
-        res.append(p.apply_async(Searcher(i).search, args=(root, num_reads, net, C)))
+    for i in range(4):
+        res.append(POOL.apply_async(Searcher(i).search, args=(root, num_reads, net, C)))
     #ret = p.imap_unordered(Searcher().search, [[root, num_reads, net, C]])
     #return list(ret)[-1]
     for r in res:
@@ -106,7 +111,7 @@ LOCK = Lock()
 COND = Condition(LOCK)
 
 import logging
-logging.basicConfig(level=logging.INFO, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
+#logging.basicConfig(level=logging.INFO, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
 log = logging.getLogger('Searcher')
 
 class Searcher():
@@ -143,7 +148,7 @@ class Searcher():
                 if leaf.parent:
                     leaf.parent.children.pop(leaf.move)
                 COND.notify_all()
-            self.search_subtree(leaf, 10, net, C)
+            self.search_subtree(leaf, 20, net, C)
 
         return max(root.children.items(),
                    key=lambda item: (item[1].number_visits, item[1].Q()))
