@@ -103,7 +103,7 @@ def Threaded_UCT_search(board, num_reads, net=None, C=1.0):
 VIRT_LOSS = -3
 def add_loss(cur, loss):
     while cur.parent is not None:
-        cur.number_visits += loss
+        cur.number_visits -= loss
         cur.total_value += loss
         cur = cur.parent
 
@@ -111,7 +111,7 @@ LOCK = Lock()
 COND = Condition(LOCK)
 
 import logging
-#logging.basicConfig(level=logging.INFO, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
 log = logging.getLogger('Searcher')
 
 class Searcher():
@@ -130,7 +130,7 @@ class Searcher():
                 if leaf:
                     if leaf.parent:
                         leaf.parent.children[leaf.move] = leaf
-                    #add_loss(leaf, -VIRT_LOSS)
+                    add_loss(leaf, -VIRT_LOSS)
                     self.backup(leaf, leaf.total_value, leaf.number_visits)
                     leaf.locked = False
 
@@ -139,12 +139,12 @@ class Searcher():
 
                 leaf = self.select_leaf(root, C)
                 if not leaf or leaf is root and self.n != 1:
-                    log.info('no leaf')
+                    log.debug('no leaf')
                     COND.wait()
                     continue
 
-                log.info('leaf search from %s', leaf.moves_from(root))
-                #add_loss(leaf, VIRT_LOSS)
+                log.debug('subtree search from %s', leaf.moves_from(root))
+                add_loss(leaf, VIRT_LOSS)
                 if leaf.parent:
                     leaf.parent.children.pop(leaf.move)
                 COND.notify_all()
