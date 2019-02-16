@@ -81,24 +81,15 @@ class UCTNode():
             cur = cur.parent
         return ' '.join(reversed(moves))
 
-POOL = None
+SEARCHER = None
 
 def Threaded_UCT_search(board, num_reads, net=None, C=1.0):
-    global POOL
     assert (net != None)
-    if not POOL:
-        POOL = Pool(10)
+    global SEARCHER
+    if not SEARCHER:
+        SEARCHER = Searcher()
 
-    root = UCTNode(board)
-    log.info('fen: %s', repr(board))
-    res = []
-    for i in range(4):
-        res.append(POOL.apply_async(Searcher(i).search, args=(root, num_reads, net, C)))
-    #ret = p.imap_unordered(Searcher().search, [[root, num_reads, net, C]])
-    #return list(ret)[-1]
-    for r in res:
-        print(r.get())
-    return r.get()
+    return SEARCHER.do_search(board, num_reads, net, C)
 
 VIRT_LOSS = -3
 def add_loss(cur, loss):
@@ -115,13 +106,66 @@ logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadNa
 log = logging.getLogger('Searcher')
 
 class Searcher():
-    def __init__(self, n=1):
-        self.done = False
-        self.n = n
+    def __init__(self, threads=5, reuse_tree=False):
+        self.pool = None
+        self.threads = threads
+        self.tree = None
+        self.reuse_tree = reuse_tree
 
-    def search(self, root, num_reads, net=None, C=1.0):
-        #ls = LeafSearcher()
-        self.root = root
+    def do_search(self, board, num_reads, net=None, C=1.0):
+        if not self.pool:
+            self.pool = Pool(self.threads)
+
+        root = None
+        if self.reuse_tree and self.tree and board.move_stack:
+            # see if we have it in our cache
+
+            # LeelaBoard trims move history :(
+            # just check one move up
+            m = board.pop()
+            if board == self.tree.board:
+                root = self.tree.children.get(m.uci())
+                if root:
+                    log.debug('found tree with %s nodes', root.number_visits)
+                    # trim tree
+                    if root.parent:
+                        del root.parent.children[root.move]
+                        root.parent = None
+            board.push(m)
+            '''
+            new_moves = board.move_stack
+            our_moves = self.tree.board.move_stack
+            if len(our_moves) <= len(new_moves) and our_moves == new_moves[:len(our_moves)]:
+                root = self.tree
+                for m in new_moves[len(our_moves):]:
+                    if root.children and m.uci() in root.children:
+                        root = root.children[m.uci()]
+                    else:
+                        root = None
+                        break
+                else:
+                    log.debug('found tree with %s nodes', root.number_visits)
+                    # trim tree
+                    if root.parent:
+                        del root.parent.children[root.move]
+                        root.parent = None
+        '''
+
+        if not root:
+            root = UCTNode(board.copy())
+
+        res = []
+        for i in range(self.threads):
+            res.append(self.pool.apply_async(self.search, args=(root, num_reads, net, C, i)))
+        for r in res:
+            print(r.get())
+
+        self.tree = root
+
+        return max(root.children.items(),
+                    key=lambda item: (item[1].number_visits, item[1].Q()))
+
+    def search(self, root, num_reads, net=None, C=1.0, searcher_num=0):
         leaf = None
         while 1:
             # get lock
@@ -138,8 +182,8 @@ class Searcher():
                     break
 
                 leaf = self.select_leaf(root, C)
-                if not leaf or leaf is root and self.n != 1:
-                    log.debug('no leaf')
+                if not leaf or leaf is root and searcher_num!=0:
+                    log.debug('no leaf %s', searcher_num)
                     COND.wait()
                     continue
 
