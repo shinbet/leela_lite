@@ -5,6 +5,10 @@ from collections import OrderedDict
 from threading import Lock, Condition
 from multiprocessing.dummy import Pool
 
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
+log = logging.getLogger('Searcher')
+
 class UCTNode():
     def __init__(self, board=None, parent=None, move=None, prior=0):
         self.board = board
@@ -91,19 +95,11 @@ def Threaded_UCT_search(board, num_reads, net=None, C=1.0):
 
     return SEARCHER.do_search(board, num_reads, net, C)
 
-VIRT_LOSS = -3
 def add_loss(cur, loss):
     while cur.parent is not None:
         cur.number_visits -= loss
         cur.total_value += loss
         cur = cur.parent
-
-LOCK = Lock()
-COND = Condition(LOCK)
-
-import logging
-logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadName)s %(levelname)s:%(funcName)s:%(lineno)d: %(message)s')
-log = logging.getLogger('Searcher')
 
 class Searcher():
     def __init__(self, threads=5, reuse_tree=False):
@@ -111,6 +107,9 @@ class Searcher():
         self.threads = threads
         self.tree = None
         self.reuse_tree = reuse_tree
+        self.lock = Lock()
+        self.cond = Condition(self.lock)
+        self.virt_loss = -3
 
     def do_search(self, board, num_reads, net=None, C=1.0):
         if not self.pool:
@@ -169,12 +168,13 @@ class Searcher():
         leaf = None
         while 1:
             # get lock
-            with LOCK as l:
+            with self.lock as l:
                 # from last search
                 if leaf:
                     if leaf.parent:
                         leaf.parent.children[leaf.move] = leaf
-                    add_loss(leaf, -VIRT_LOSS)
+                    if self.virt_loss:
+                        add_loss(leaf, -self.virt_loss)
                     self.backup(leaf, leaf.total_value, leaf.number_visits)
                     leaf.locked = False
 
@@ -184,14 +184,15 @@ class Searcher():
                 leaf = self.select_leaf(root, C)
                 if not leaf or leaf is root and searcher_num!=0:
                     log.debug('no leaf %s', searcher_num)
-                    COND.wait()
+                    self.cond.wait()
                     continue
 
                 log.debug('subtree search from %s', leaf.moves_from(root))
-                add_loss(leaf, VIRT_LOSS)
+                if self.virt_loss:
+                    add_loss(leaf, self.virt_loss)
                 if leaf.parent:
                     leaf.parent.children.pop(leaf.move)
-                COND.notify_all()
+                self.cond.notify_all()
             self.search_subtree(leaf, 20, net, C)
 
         return max(root.children.items(),
@@ -245,16 +246,6 @@ class Searcher():
         current.number_visits += 1
         current.total_value += (value_estimate *
                                 turnfactor)
-
-
-#num_reads = 10000
-#import time
-#tick = time.time()
-#UCT_search(GameState(), num_reads)
-#tock = time.time()
-#print("Took %s sec to run %s times" % (tock - tick, num_reads))
-#import resource
-#print("Consumed %sB memory" % resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 import unittest
 class TestSearch(unittest.TestCase):
