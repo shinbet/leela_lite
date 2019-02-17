@@ -1,0 +1,217 @@
+import math
+import queue
+
+from chess import BLACK
+from lcztools import LeelaBoard, load_network
+from collections import OrderedDict
+
+from multiprocessing import Pool, Process, Queue
+
+import logging
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger('Searcher')
+
+class UCTNode():
+    def __init__(self, board=None, parent=None, move=None, prior=0):
+        self.board = board
+        self.move = move
+        self.is_expanded = False
+        self.parents = [parent] if parent else []  # Optional[UCTNode]
+        self.children = OrderedDict()  # Dict[move, UCTNode]
+        self.prior = prior  # float
+        if parent == None:
+            self.total_value = 0.  # float
+        else:
+            self.total_value = -1.0
+        self.number_visits = 0  # int
+        self.terminal = False
+
+    def Q(self):  # returns float
+        return self.total_value / (1 + self.number_visits)
+
+    def U(self):  # returns float
+        return (math.sqrt(self.parents[0].number_visits)
+                * self.prior / (1 + self.number_visits))
+
+    def best_child(self, C):
+        return max(self.children.values(),
+                   key=lambda node: node.Q() + C*node.U())
+
+    def expand(self, child_priors):
+        self.is_expanded = True
+        for move, prior in child_priors.items():
+            self.add_child(move, prior)
+
+    def add_child(self, move, prior):
+        self.children[move] = UCTNode(parent=self, move=move, prior=prior)
+
+    def dump(self, move, C):
+        print("---")
+        print("move: ", move)
+        print("total value: ", self.total_value)
+        print("visits: ", self.number_visits)
+        print("prior: ", self.prior)
+        print("Q: ", self.Q())
+        print("U: ", self.U())
+        print("BestMove: ", self.Q() + C * self.U())
+        #print("math.sqrt({}) * {} / (1 + {}))".format(self.parent.number_visits,
+        #      self.prior, self.number_visits))
+        print("---")
+
+    def __str__(self):
+        if self.parents:
+            return 'Move: {} Tot:{} Visits:{} prior:{} Q:{} U:{}'.format(self.move, self.total_value,
+                                                                         self.number_visits, self.prior,
+                                                                         self.Q(), self.U())
+        else:
+            return 'root node Tot:{} Visits:{}'.format(self.total_value, self.number_visits)
+
+    def dump_children(self):
+        for move, c in self.children.values():
+            print(c)
+
+    def moves_from(self, top=None):
+        cur = self
+        moves = []
+        while cur is not top and cur.move:
+            moves.append(cur.move)
+            cur = cur.parents[0]
+        return ' '.join(reversed(moves))
+
+
+def UCT_transpose_search(board, num_reads, net=None, C=1.0):
+    log.info('got board: %s', repr(board))
+    return Searcher().do_search(board, num_reads, net, C)
+
+class Searcher():
+    def __init__(self, reuse_tree=False, traspose_cache=None):
+        self.tree = None
+        self.reuse_tree = reuse_tree
+        self.traspose_cache = traspose_cache if traspose_cache else {}
+
+    def do_search(self, board, num_reads, net=None, C=1.0):
+        root = None
+        if self.reuse_tree and self.tree and board.move_stack:
+            # see if we have it in our cache
+
+            # LeelaBoard trims move history :(
+            # just check one move up
+            m = board.pop()
+            if board == self.tree.board:
+                root = self.tree.children.get(m.uci())
+                if root:
+                    log.debug('found tree with %s nodes', root.number_visits)
+                    # trim tree
+                    if root.parent:
+                        del root.parent.children[root.move]
+                        root.parent = None
+                root.move = None
+            board.push(m)
+
+        if not root:
+            root = UCTNode(board.copy())
+
+        root = self.search(root, num_reads + root.number_visits, net, C)
+
+        self.tree = root
+
+        return max(root.children.items(),
+                    key=lambda item: (item[1].number_visits, item[1].Q()))
+
+    def search(self, root, num_reads, net=None, C=1.0):
+        for _ in range(num_reads):
+            leaf, moves, is_transposition = self.select_leaf(root, C)
+            if leaf.terminal:
+                value_estimate = leaf.total_value
+            elif not is_transposition:
+                log.debug('got leaf %s %s', leaf, moves)
+                board = leaf.board
+                self.traspose_cache[board.pc_board._transposition_key()] = leaf
+                if board.pc_board.is_game_over() or board.is_draw():
+                    result = board.pc_board.result(claim_draw=True)
+                    value_estimate = {'1-0':1.0, '0-1':-1.0, '1/2-1/2': 0.0}[result]
+                    if board.turn == BLACK:
+                        value_estimate *= -1
+                    leaf.terminal = True
+                else:
+                    child_priors, value_estimate = net.evaluate(leaf.board)
+                    leaf.expand(child_priors)
+            self.backup(leaf, value_estimate, 1)
+
+        return root
+
+    '''
+    def expand(self, leaf, child_priors):
+        leaf.is_expanded = True
+        board = leaf.board.copy()
+        for move, prior in child_priors.items():
+            board.push_uci(move)
+            existing = self.traspose_cache.get(board.pc_board._transposition_key())
+            board.pop()
+            if existing:
+                log.debug('trasposition: %s  <=> %s', leaf.moves_from(), existing.moves_from())
+                # FIXME: propagate counts up?
+                leaf.children[move] = existing
+                leaf.number_visits += existing.number_visits
+                leaf.total_value += existing.total_value
+            else:
+                leaf.add_child(move, prior)
+    '''
+
+    def select_leaf(self, current, C):
+        moves = []
+        transposition = False
+        while current.is_expanded and current.children:
+            current = current.best_child(C)
+            moves.append(current.move)
+            if len(moves) > 100:
+                import pdb
+                pdb.set_trace()
+        if not current.board:
+            current.board = current.parents[0].board.copy()
+            current.board.push_uci(current.move)
+
+            # check if this child is a transposition from another path
+            key = current.board.pc_board._transposition_key()
+            existing = self.traspose_cache.get(key)
+            if existing:
+                log.info('found trasposition: %s  <=> %s', current.moves_from(), existing.moves_from())
+                # transposition can be from any level
+                # in that case makesure we're not building a cycle
+                if current.board._lcz_transposition_counter[key] > 1:
+                    log.info('got repetition')
+                    current.total_value = 0.0
+                    current.number_visits = 1
+                    current.terminal = True
+                else:
+                    # link parent to existing, link existing to parent
+                    current.parents[0].children[current.move] = existing
+                    current = existing
+                    transposition = True
+        return current, moves, transposition
+
+    def backup(self, node: UCTNode, value_estimate: float, count: int=1):
+        nodes = {node}
+        # Child nodes are multiplied by -1 because we want max(-opponent eval)
+        turnfactor = -1
+        done = {}
+        while nodes:
+            parents = set()
+            for cur in nodes:
+                parents.update(cur.parents)  # FIXME: if we traspose across move numbers need to check done
+                cur.number_visits += count
+                cur.total_value += (value_estimate * turnfactor)
+            nodes = parents
+            turnfactor *= -1
+
+
+
+if __name__ == '__main__':
+    net = load_network(backend='pytorch_cpu', filename='../weights_9149.txt.gz', policy_softmax_temp=2.2)
+    b = LeelaBoard()
+    b = LeelaBoard(fen='rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4')
+    #b=LeelaBoard(fen='rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3')
+    s = Searcher()
+    ret = s.do_search(b, 2000, net, 3.4)
+    print(ret)
