@@ -5,4 +5,5 @@ from search.mpa_backup import MPA_search
 from search.bellman_backup import Bellman_search
 from search.minmax_backup import MinMax_search
 from search.threaded_uct import Threaded_UCT_search
+from search.mp_uct import mp_search
 # from uct.util import softmax, temp_softmax
