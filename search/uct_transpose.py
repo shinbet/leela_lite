@@ -1,12 +1,25 @@
+"""
+    Try to eliminate transpositions for more efficient search.
+    There are a few 'types' of transpositions that we try to improve:
+    1. simple repetition of position within one line
+    2. different move order between lines
+    3. different moves that lead to same position between lines
+
+    only #2 is currently enabled, though handling repetition is in the code and can be enbaled with a small fix.
+
+    there are a few issues that need to be thought about:
+    - how to handle #3. it can cause cycles which we cannot handle. maybe mark the longest path as terminal draw?
+      right now transpositions are restricted to only those on same depth so no cycles can occur
+    - currently when a transposition is found we link another parent to the same node and propagate the score up
+      as if there was a multivisit search done... is that fair? what is the effect of this?
+
+"""
+
 import math
-import queue
 
 from chess import BLACK
 from lcztools import LeelaBoard, load_network
 from collections import OrderedDict
-
-from multiprocessing import Pool, Process, Queue
-
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -168,24 +181,6 @@ class Searcher():
 
         return root
 
-    '''
-    def expand(self, leaf, child_priors):
-        leaf.is_expanded = True
-        board = leaf.board.copy()
-        for move, prior in child_priors.items():
-            board.push_uci(move)
-            existing = self.traspose_cache.get(board.pc_board._transposition_key())
-            board.pop()
-            if existing:
-                log.debug('trasposition: %s  <=> %s', leaf.moves_from(), existing.moves_from())
-                # FIXME: propagate counts up?
-                leaf.children[move] = existing
-                leaf.number_visits += existing.number_visits
-                leaf.total_value += existing.total_value
-            else:
-                leaf.add_child(move, prior)
-    '''
-
     def select_leaf(self, current, C):
         moves = []
         transposition = False
@@ -194,6 +189,7 @@ class Searcher():
             move, current = current.best_child(C)
             moves.append(move)
             if len(moves) > 100:
+                # probably cycle
                 import pdb
                 pdb.set_trace()
 
@@ -208,6 +204,7 @@ class Searcher():
                 log.info('found trasposition: %s  <=> %s', current.moves_from(), existing.moves_from())
                 # transposition can be from any level
                 # in that case makesure we're not building a cycle
+                # FIXME:
                 if current.board._lcz_transposition_counter[key] > 1:
                     log.info('got repetition')
                     current.total_value = 0.0
@@ -219,7 +216,7 @@ class Searcher():
                     existing.parents.append(current.parents[0])
                     current = existing
                     transposition = True
-                    check_cycle(current)
+                    #check_cycle(current)
 
         return current, moves, transposition
 
