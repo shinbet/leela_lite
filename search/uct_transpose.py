@@ -8,7 +8,9 @@
     only #2 is currently enabled, though handling repetition is in the code and can be enbaled with a small fix.
 
     there are a few issues that need to be thought about:
-    - how to handle #3. it can cause cycles which we cannot handle. maybe mark the longest path as terminal draw?
+    - how to handle #3. it can cause cycles which we cannot handle.
+      maybe mark the longest path as terminal draw?
+      can we restrict links to go backwards(and horizontal) only maybe? how does this effect 3fold detection etc (maybe need to remove board from node)
       right now transpositions are restricted to only those on same depth so no cycles can occur
     - currently when a transposition is found we link another parent to the same node and propagate the score up
       as if there was a multivisit search done... is that fair? what is the effect of this?
@@ -228,7 +230,7 @@ class Searcher():
         while nodes:
             parents = set()
             for cur in nodes:
-                parents.update(cur.parents)  # FIXME: if we traspose across move numbers need to check done
+                parents.update(cur.parents)  # FIXME: if we traspose across move numbers need to make sure we keep track of parents and only do them once
                 cur.number_visits += count
                 cur.total_value += (value_estimate * turnfactor)
             nodes = parents
