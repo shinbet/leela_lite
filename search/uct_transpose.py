@@ -174,13 +174,10 @@ class Searcher():
                 else:
                     child_priors, value_estimate = net.evaluate(leaf.board)
                     leaf.expand(child_priors)
-
-            # in transpositions, only backup last parent, leaf already has value and was propogated to its other parents
-            if is_transposition:
-                self.backup(leaf.parents[-1], -value_estimate, 1)
             else:
-                self.backup(leaf, value_estimate, 1)
-
+                value_estimate = leaf.total_value / leaf.number_visits
+                moves = moves[:-1]
+            self.backup_path(root, moves, value_estimate, 1)
         return root
 
     def select_leaf(self, current, C):
@@ -210,7 +207,7 @@ class Searcher():
                 if current.board._lcz_transposition_counter[key] > 1:
                     log.info('got repetition')
                     current.total_value = 0.0
-                    current.number_visits = 1
+                    current.number_visits = 0
                     current.terminal = True
                 else:
                     # link parent to existing, link existing to parent
@@ -221,6 +218,16 @@ class Searcher():
                     #check_cycle(current)
 
         return current, moves, transposition
+
+    def backup_path(self, root: UCTNode, path: list, value_estimate: float, count: int=1):
+        cur = root
+        turnfactor = -1 * len(path)
+        for move in path:
+            cur.total_value += value_estimate * turnfactor
+            cur.number_visits += count
+            cur = cur.children[move]
+        cur.number_visits += count
+        cur.total_value += value_estimate * turnfactor
 
     def backup(self, node: UCTNode, value_estimate: float, count: int=1):
         nodes = {node}
