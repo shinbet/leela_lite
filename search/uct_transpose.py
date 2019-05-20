@@ -8,6 +8,7 @@
     only #2 is currently enabled, though handling repetition is in the code and can be enbaled with a small fix.
 
     there are a few issues that need to be thought about:
+    - 3 fold repetition is major issue, since it depends on the path chosen. This is probably deal breaker
     - how to handle #3. it can cause cycles which we cannot handle.
       maybe mark the longest path as terminal draw?
       can we restrict links to go backwards(and horizontal) only maybe? how does this effect 3fold detection etc (maybe need to remove board from node)
@@ -15,19 +16,46 @@
     - currently when a transposition is found we link another parent to the same node and propagate the score up
       as if there was a multivisit search done... is that fair? what is the effect of this?
 
+    - cycle example:
+    a  b  c  d
+    a' c  d' b
+
+    a->b->c->d'->b->c->d'...
+
+    'e7d6 d1c2 d7f8 a1e1 d6e7 e1a1'
+    'd7f8 d1c2 e7d6 '
+    this has a cycle:
+    e7d6 d1c2 d7f8
+    =
+    d7f8 d1c2 e7d6
+
+    and
+
+    e7d6 d1c2 d7f8 a1e1 d6e7 e1a1
+    =
+    d7f8 d1c2
+
+    - repetitions are a problem:
+      a -> b -> c -> b'
+      a -> d -> c -> b
+      what do we backprop to c? we can't have both b and b'
+
 """
 
 import math
 
-from chess import BLACK
 from lcztools import LeelaBoard, load_network
 from collections import OrderedDict
 import logging
 
-logging.basicConfig(level=logging.INFO)
+import search
+
+logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger('Searcher')
 
 class UCTNode():
+    __slots__ = 'board is_expanded parents children prior total_value number_visits terminal'.split()
+
     def __init__(self, board=None, parent=None, prior=0):
         self.board = board
         self.is_expanded = False
@@ -94,9 +122,11 @@ class UCTNode():
             cur = cur.parents[0]
         return ' '.join(reversed(moves))
 
+
 def transposition_key(board):
     # add move to avoid hard cycles
-    return board.pc_board._transposition_key() + (board.pc_board.fullmove_number,)
+    key = board.pc_board._transposition_key()
+    return key + (board.pc_board.fullmove_number, board._lcz_transposition_counter[key])
 
 def check_cycle(node, seen=None):
     return False
@@ -153,7 +183,7 @@ class Searcher():
                     key=lambda item: (item[1].number_visits, item[1].Q()))
 
     def search(self, root, num_reads, net=None, C=1.0):
-        for _ in range(num_reads):
+        for i in range(num_reads):
             leaf, moves, is_transposition = self.select_leaf(root, C)
             if leaf.terminal:
                 value_estimate = leaf.total_value
@@ -161,23 +191,18 @@ class Searcher():
                 log.debug('got leaf %s %s', leaf, moves)
                 board = leaf.board
                 self.transpose_cache[transposition_key(board)] = leaf
-                if board.pc_board.is_game_over() or board.is_draw():
-                    # fix leelaboard - move stack is trimmed, so 3 fold doesnt work (override can_claim_threefold_repetition)
-                    if board.is_draw():
-                        value_estimate = 0.0
-                    else:
-                        result = board.pc_board.result(claim_draw=True)
-                        value_estimate = {'1-0':1.0, '0-1':-1.0, '1/2-1/2': 0.0}[result]
-                        if board.turn == BLACK:
-                            value_estimate *= -1
+                child_priors, value_estimate = net.evaluate(leaf.board)
+                if not child_priors:
                     leaf.terminal = True
-                else:
-                    child_priors, value_estimate = net.evaluate(leaf.board)
-                    leaf.expand(child_priors)
+                leaf.expand(child_priors)
             else:
                 value_estimate = leaf.total_value / leaf.number_visits
                 moves = moves[:-1]
             self.backup_path(root, moves, value_estimate, 1)
+
+            if i % 100 == 0:
+                log.debug('eval:\n%s', '\n'.join(f'{m} {n}' for m, n in sorted(root.children.items(), key=lambda kv: kv[1].number_visits, reverse=True)[:10]))
+
         return root
 
     def select_leaf(self, current, C):
@@ -221,7 +246,7 @@ class Searcher():
 
     def backup_path(self, root: UCTNode, path: list, value_estimate: float, count: int=1):
         cur = root
-        turnfactor = -1 * len(path)
+        turnfactor = -2 * (len(path) % 2) + 1
         for move in path:
             cur.total_value += value_estimate * turnfactor
             cur.number_visits += count
@@ -246,11 +271,13 @@ class Searcher():
 
 
 if __name__ == '__main__':
-    net = load_network(backend='pytorch_cpu', filename='../weights_9149.txt.gz', policy_softmax_temp=2.2)
-    #b = LeelaBoard()
-    b = LeelaBoard(fen='rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4')
+    net = load_network(backend='pytorch_cpu', filename='../endgame-64x6-200000.txt.gz', policy_softmax_temp=2.2)
+    nn = search.NeuralNet(net)
+    b = LeelaBoard()
+    #b = LeelaBoard(fen='rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4')
     #b=LeelaBoard(fen='rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3')
-    b=LeelaBoard(fen='8/8/8/5k2/3n1p2/3N3p/5K1P/8 b - - 1 54')
+    #b=LeelaBoard(fen='8/8/8/5k2/3n1p2/3N3p/5K1P/8 b - - 1 54')
+    #b=LeelaBoard(fen='7k/1RR4P/8/8/3K4/3r4/8/8 w - - 0 1')
     s = Searcher()
-    ret = s.do_search(b, 20000, net, 3.4)
+    ret = s.do_search(b, 20000, nn, 3.4)
     print(ret)
